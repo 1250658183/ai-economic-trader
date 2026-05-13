@@ -1,0 +1,93 @@
+name: Pairs Scanner
+
+# 触发方式：
+#   1) 工作日 A 股收盘 + 腾讯财经 16:30 刷新后，北京时间 17:30 跑扫描（UTC 09:30）
+#   2) 允许任意时刻在 Actions 页手动点 "Run workflow"
+on:
+  schedule:
+    - cron: '30 9 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      commit_message:
+        description: '提交信息（留空则自动生成）'
+        required: false
+        default: ''
+
+# 需要写权限才能把新的 pairs_config.json 推回仓库
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 缓存腾讯财经日K数据
+        uses: actions/cache@v4
+        with:
+          path: data_cache
+          key: data-cache-${{ github.run_id }}
+          restore-keys: |
+            data-cache-
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 执行配对扫描
+        id: scan
+        run: |
+          python -u pairs_scanner.py 2>&1 | tee scan.log
+          echo "scan_date=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: 上传扫描日志（artifact，保留14天）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-log-${{ steps.scan.outputs.scan_date }}
+          path: |
+            scan.log
+            pairs_config.json
+          retention-days: 14
+
+      - name: 检测结果文件是否发生变化
+        id: diff
+        run: |
+          if git diff --quiet -- pairs_config.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "📭 pairs_config.json 无变化，跳过提交"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "📬 检测到 pairs_config.json 变化"
+            git diff --stat -- pairs_config.json
+          fi
+
+      - name: 提交并推送新结果
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 提取关键指标写入提交信息
+          PASSED=$(python -c "import json; d=json.load(open('pairs_config.json')); print(d.get('cointegration_passed','?'))")
+          VALIDATED=$(python -c "import json; d=json.load(open('pairs_config.json')); print(d.get('validated_count','?'))")
+
+          MSG="${{ inputs.commit_message }}"
+          if [ -z "$MSG" ]; then
+            MSG="chore(scan): 自动扫描 ${{ steps.scan.outputs.scan_date }}（协整${PASSED}对 / 入选${VALIDATED}对）"
+          fi
+
+          git add pairs_config.json
+          git commit -m "$MSG"
+          git push
