@@ -1,0 +1,77 @@
+name: Daily Signals
+
+# 触发：工作日 UTC 09:00 (北京 17:00) - A 股 15:00 收盘 + 腾讯 16:30 数据刷新后
+# 与 scan.yml 的 09:30 错开 30 分钟，避免缓存竞争
+on:
+  schedule:
+    - cron: '0 9 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  signals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 缓存腾讯财经日K数据（与 scan.yml 共用）
+        uses: actions/cache@v4
+        with:
+          path: data_cache
+          key: data-cache-${{ github.run_id }}
+          restore-keys: |
+            data-cache-
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 计算每日信号
+        id: signals
+        run: |
+          python -u daily_signals.py
+          echo "scan_date=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: 上传报告（artifact 保留 30 天）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-signals-${{ steps.signals.outputs.scan_date }}
+          path: |
+            daily_signals.md
+            daily_signals.json
+          retention-days: 30
+
+      - name: 检测是否触发买卖信号
+        id: check
+        run: |
+          HAS=$(python -c "import json; print(str(json.load(open('daily_signals.json'))['has_signal']).lower())")
+          echo "has_signal=$HAS" >> "$GITHUB_OUTPUT"
+          echo "今日 has_signal = $HAS"
+
+      - name: 有信号则开 Issue（自动触发邮件通知）
+        if: steps.check.outputs.has_signal == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date -u +'%Y-%m-%d')
+          gh issue create \
+            --title "🚨 配对交易信号 · $DATE" \
+            --body-file daily_signals.md \
+            --label signal || \
+          gh issue create \
+            --title "🚨 配对交易信号 · $DATE" \
+            --body-file daily_signals.md

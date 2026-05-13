@@ -5,3 +5,7 @@ monitor_states/
 trades_data.json
 trades_export.csv
 *.pyc
+
+# 每日信号报告作为 artifact 不入库
+daily_signals.md
+daily_signals.json
