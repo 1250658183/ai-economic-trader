@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+data_cache/
+monitor_states/
+trades_data.json
+trades_export.csv
+*.pyc
